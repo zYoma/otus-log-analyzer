@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 from typing import Any, Generator, Optional
 
+import concurrent.futures
 import configparser
 import gzip
 import optparse
@@ -15,9 +16,9 @@ from datetime import date, datetime
 from logging import getLogger
 from logging.config import dictConfig
 from string import Template
-import concurrent.futures
 
 from conf.logging import get_logging_config
+from concurrent import Future
 
 
 logger = getLogger("log-analyzer")
@@ -119,31 +120,22 @@ def get_perc(total_count: float, count: float) -> float:
         raise BaseLogAnalyzerError
 
 
-def get_log_data(log_file: str, requests_count: int, report_size: int) -> Optional[list[dict[str, Any]]]:
+def get_log_data(log_list: list, requests_count: int, report_size: int) -> Optional[list[dict[str, Any]]]:
     """
-    Функция получает на вход файл с логами, парсит его, отдельно собирает список урлов для подсчета
+    Функция получает на вход список распаршенных логов, отдельно собирает список урлов для подсчета
     количества (используется collections.Counter) и формирует словарь для расчета требуемых значений
     вида {'url': [1.2, 1,3, 1.4]}, где значения - списки request_time относящихся к данному урлу.
     На выходе формируется результирующий список отсортированный по time_sum и обрезанный по report_size.
 
-    :param log_file: файл с логами
-    :param filename: имя файла с логами
+    :param log_list: список распаршенных логов
+    :param requests_count: общее колличество записей в логе
     :param report_size: количество строк для рапорта из конфига
     :return: список результатов для генерации таблицы
     """
-    # log_file_list = log_file.split('\n')
-    #
-    # # log_file = '\n'.join(log_file_list[:100])
-    #
-    # requests_count = len(log_file_list)
-    # data = re.findall(log_pattern, log_file)
-
-
-
     urls_data: dict[str, Any] = {}
     url_list: list[str] = []
     total_request_time = 0.0
-    for url, request_time in log_file:
+    for url, request_time in log_list:
         url_list.append(url)
         request_time = float(request_time)
         total_request_time += request_time
@@ -184,12 +176,11 @@ def create_report(report_name: str, data: list, report_dir: str):
         f.write(result)
 
 
-
-def ssss(log_file):
+def pars_log(log_file: str) -> list[tuple[Any]]:
     return re.findall(log_pattern, log_file)
 
 
-def get_slice_size_and_remainder(requests_count: int, worker_count: int):
+def get_slice_size_and_remainder(requests_count: int, worker_count: int) -> tuple[int, int]:
     """
     Для параллельного парсинга данных делим лог на чанки. Функция определяет размер среза и остаток.
     :param requests_count: всего строк в логе
@@ -202,6 +193,31 @@ def get_slice_size_and_remainder(requests_count: int, worker_count: int):
     return slice_size, remainder
 
 
+def data_preparation_for_processing(
+        executor: ProcessPoolExecutor,
+        log_file_list: list,
+        slice_size: int,
+        remainder: int,
+        worker_count: int
+) -> dict[Future[list[tuple[Any]]], str]:
+    """ Функция нарезает исходный лог файл на чанки для паралельного исполнения."""
+    slice_start = 0
+    slice_end = slice_size
+    future_to_pars = {}
+    for i in range(worker_count):
+        if i + 1 == worker_count:
+            # Если это последний чанк, добавляем остаток строк
+            slice_end += remainder + 1
+        log_slice = log_file_list[slice_start:slice_end]
+        chunk = '\n'.join(log_slice)
+        future_to_pars[executor.submit(pars_log, chunk)] = chunk
+
+        slice_start = slice_end
+        slice_end += slice_size
+
+    return future_to_pars
+
+
 def main():
     conf = get_config(config)
 
@@ -209,7 +225,7 @@ def main():
     log_dir = conf.get('LOG_DIR')
     report_size = conf.get('REPORT_SIZE')
     report_dir = conf.get('REPORT_DIR')
-    worker_count = conf.get('WORKER_COUNT', 1)
+    worker_count = int(conf.get('WORKER_COUNT', 1))
 
     dictConfig(get_logging_config(logging_file_path))
 
@@ -224,34 +240,27 @@ def main():
         slice_size, remainder = get_slice_size_and_remainder(requests_count, worker_count)
 
         with concurrent.futures.ProcessPoolExecutor(max_workers=worker_count) as executor:
-            slice_start = 0
-            slice_end = slice_size
-            future_to_url = {}
-            for i in range(worker_count):
-                if i + 1 == worker_count:
-                    slice_end += remainder + 1
-                # print(f'c {slice_start} по {slice_end}')
-                f = log_file_list[slice_start:slice_end]
-                f = '\n'.join(f)
-                future_to_url[executor.submit(ssss, f)] = f
-
-                slice_start = slice_end
-                slice_end += slice_size
+            future_to_pars = data_preparation_for_processing(
+                executor,
+                log_file_list,
+                slice_size,
+                remainder,
+                worker_count
+            )
 
             results = []
-            for future in concurrent.futures.as_completed(future_to_url):
-                url = future_to_url[future]
+            for future in concurrent.futures.as_completed(future_to_pars):
                 try:
-                    data = future.result()
-                    results += data
-                except Exception as exc:
-                    print('generated an exception: %s' % (exc))
+                    pars_data = future.result()
+                except Exception:
+                    logger.error(f'Ошибка парсинга файла {filename}')
                 else:
-                    print('count %d' % (len(data)))
-        print(len(results))
+                    results += pars_data
+
         if get_perc(requests_count, len(results)) < 50:
             logger.error(f'Неудалось распарсить больше половины файла {filename}')
             continue
+
         data_for_render = get_log_data(results, requests_count, report_size)
         if data_for_render:
             create_report(report_name, data_for_render, report_dir)
