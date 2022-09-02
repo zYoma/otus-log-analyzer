@@ -12,13 +12,13 @@ import statistics
 import sys
 import time
 from collections import Counter
+from concurrent.futures import Future, ProcessPoolExecutor
 from datetime import date, datetime
 from logging import getLogger
 from logging.config import dictConfig
 from string import Template
 
 from conf.logging import get_logging_config
-from concurrent import Future
 
 
 logger = getLogger("log-analyzer")
