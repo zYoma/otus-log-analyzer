@@ -42,18 +42,14 @@ def test_is_archive(filename, result):
     assert test_result == result
 
 
-@pytest.mark.parametrize('total_count, count, result, error', [  # noqa
-    (1000, 20, 2.0, False),
-    (5, 2, 40.0, False),
-    (0, 20, 2.0, BaseLogAnalyzerError),
+@pytest.mark.parametrize('total_count, count, result', [  # noqa
+    (1000, 20, 2.0),
+    (5, 2, 40.0),
+    (0, 20, 0),
 ])
-def test_get_perc(total_count, count, result, error):
-    if error:
-        with pytest.raises(error):
-            get_perc(total_count, count)
-    else:
-        test_result = get_perc(total_count, count)
-        assert test_result == result
+def test_get_perc(total_count, count, result):
+    test_result = get_perc(total_count, count)
+    assert test_result == result
 
 
 def test_get_log_files(create_log_files):

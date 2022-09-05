@@ -2,17 +2,17 @@
 # -*- coding: utf-8 -*-
 from typing import Any, Generator, Optional
 
-import concurrent.futures
 import configparser
+import copy
 import gzip
 import optparse
 import os
 import re
+import shutil
 import statistics
 import sys
 import time
 from collections import Counter
-from concurrent.futures import Future, ProcessPoolExecutor
 from datetime import date, datetime
 from logging import getLogger
 from logging.config import dictConfig
@@ -23,27 +23,20 @@ from conf.logging import get_logging_config
 
 logger = getLogger("log-analyzer")
 
-log_pattern = r'.* .*  .* \[.*\] \".* (?P<url>.*) .*\" .* .* \".*\" \".*\" \".*\" \".*\" \".*\" (?P<request_time>.*)'
-service_name_pattern = r'nginx-access-ui'
-
-config = {
+LOG_COMPILED = re.compile(
+    r'.* .*  .* \[.*\] \".* (?P<url>.*) .*\" .* .* \".*\" \".*\" \".*\" \".*\" \".*\" (?P<request_time>.*)'
+)
+FILE_NAME_COMPILED = re.compile(r'^nginx-access-ui\.log-(?P<date>\d{8})(?P<ext>\.gz)?$')
+SERVICE_NAME_PATTERN = r'nginx-access-ui'
+TMP_REPORT_PATH = '/tmp/report.html'
+CONFIG = {
     "REPORT_SIZE": 1000,
     "REPORT_DIR": "./reports",
     "LOG_DIR": "./log"
 }
 
 
-class BaseLogAnalyzerError(Exception):
-    pass
-
-
-def get_config(config_file: dict) -> dict[str, Any]:
-    """
-    Путь к конфигурационному ini файлу передается в атрибуте --config.
-    Дефолтная конфигурация обновляется переданной в файле.
-    :param config_file: словарь с дефолтными конфигами
-    :return: обновленная конфигурация
-    """
+def get_args_parser() -> Optional[configparser.ConfigParser]:
     args_parser = optparse.OptionParser()
     config_ini_parser = configparser.ConfigParser()
 
@@ -52,75 +45,85 @@ def get_config(config_file: dict) -> dict[str, Any]:
     options, _ = args_parser.parse_args()
     if options.config:
         config_ini_parser.read(options.config)
+        return config_ini_parser
+
+    return None
+
+
+def get_config(
+        config_file: dict,
+        config_ini_parser: Optional[configparser.ConfigParser]
+) -> Optional[dict[str, Any]]:
+    actual_config = copy.deepcopy(config_file)
+    if config_ini_parser:
         try:
             [
-                config_file.update({param.upper(): value})
+                actual_config.update({param.upper(): value})
                 for param, value in config_ini_parser['log-analyzer'].items()
             ]
         except KeyError:
-            logger.warning('Не удалось распарсить файл конфигурации.')
-            raise BaseLogAnalyzerError
+            logger.error('Не удалось распарсить файл конфигурации.')
+            return None
 
-    return config_file
-
-
-def get_log_files(log_dir: str) -> list[str]:
-    """ Собираем список всех абсолютных путей к файлам в переданном каталоге.
-        Парсятся имена файлов для получения даты. Итоговый список сортируется по дате.
-    """
-    logs = [
-        os.path.join(dir_path, name)
-        for (dir_path, _, filenames) in os.walk(log_dir)
-        for name in filenames
-        if re.search(service_name_pattern, name)  # Берем только логи сервиса ui
-    ]
-    file_dates = [get_file_date(file) for file in logs]
-    return [x for _, x in sorted(zip(file_dates, logs), key=lambda pair: pair[0], reverse=True)]
+    return actual_config
 
 
-def get_file_date(filename: str) -> date:
-    filename = filename.split('/')[-1]
-    if date := re.search(r'(?P<date>\d+)', filename):
-        return datetime.strptime(date.group('date'), '%Y%m%d').date()
+def get_filename_from_path(path: str) -> str:
+    if not path:
+        return ''
+    return path.split('/')[-1]
 
-    logger.error(f'Не удается распарсить дату лог файла {filename}')
-    raise BaseLogAnalyzerError
+
+def get_log_files(log_dir: str) -> list[tuple]:
+    return sorted(
+        [
+            # ('./log/nginx-access-ui.log-20190722', datetime.date(2019, 7, 22))
+            (os.path.join(dir_path, name), get_file_date(name))
+            for (dir_path, _, filenames) in os.walk(log_dir)
+            for name in filenames
+            if re.search(SERVICE_NAME_PATTERN, name)  # Берем только логи сервиса ui
+            and get_file_date(name)  # только те у которых парсится дата в имени
+        ], key=lambda pair: pair[1], reverse=True  # type: ignore # Сортируем по дате
+    )
+
+
+def get_file_date(file_path: str) -> Optional[date]:
+    if date := FILE_NAME_COMPILED.match(get_filename_from_path(file_path)):
+        try:
+            return datetime.strptime(date.group('date'), '%Y%m%d').date()
+        except (ValueError, AttributeError):
+            pass
+
+    logger.info(f'Не удается распарсить дату лог файла {file_path}')
+    return None
 
 
 def get_report_name(filename: str) -> str:
     date = get_file_date(filename)
+    if not date:
+        date = datetime.now()
     return f"report-{datetime.strftime(date, '%Y.%m.%d')}.html"
 
 
-def is_archive(filename: str) -> bool:
-    ext = filename.split('.')[-1]
-    return True if ext == 'gz' else False
+def is_gzip_file(filename: str) -> bool:
+    return filename.split('.')[-1] == 'gz'
 
 
-def unpack_files(logs: list[str]) -> Generator[tuple[str, str, str], None, None]:
-    for file in logs:
-        report_name = get_report_name(file)
-        filename = file.split('/')[-1]
-
-        if is_archive(file):
-            with gzip.open(file, 'rb') as f:
-                log = f.read().decode()
-        else:
-            with open(file, 'r') as f:
-                log = f.read()
-
-        yield log, filename, report_name
+def unpack_file(log: str) -> Generator[str, None, None]:
+    is_archive = is_gzip_file(log)
+    open_fn = gzip.open if is_archive else open
+    with open_fn(log, 'rb') as f:  # type: ignore
+        for line in f:
+            yield line.decode()
 
 
 def get_perc(total_count: float, count: float) -> float:
-    try:
-        return 100 / total_count * count
-    except ZeroDivisionError:
-        logger.error('Получен пустой файл.')
-        raise BaseLogAnalyzerError
+    if not total_count:
+        return 0
+    return 100 / total_count * count
 
 
-def get_log_data(log_list: list, requests_count: int, report_size: int) -> Optional[list[dict[str, Any]]]:
+def get_data_for_render(log_list: list, requests_count: int, report_size: int) -> Optional[list[dict[str, Any]]]:
     """
     Функция получает на вход список распаршенных логов, отдельно собирает список урлов для подсчета
     количества (используется collections.Counter) и формирует словарь для расчета требуемых значений
@@ -172,98 +175,54 @@ def create_report(report_name: str, data: list, report_dir: str):
         src = Template(f.read())
         result = src.safe_substitute(table_json=data)
 
-    with open(os.path.join(report_dir, report_name), 'w') as f:
+    with open(TMP_REPORT_PATH, 'w') as f:
         f.write(result)
+
+    shutil.move(TMP_REPORT_PATH, os.path.join(report_dir, report_name))
 
 
 def pars_log(log_file: str) -> list[tuple[Any]]:
-    return re.findall(log_pattern, log_file)
+    return LOG_COMPILED.findall(log_file)
 
 
-def get_slice_size_and_remainder(requests_count: int, worker_count: int) -> tuple[int, int]:
-    """
-    Для параллельного парсинга данных делим лог на чанки. Функция определяет размер среза и остаток.
-    :param requests_count: всего строк в логе
-    :param worker_count: число процессов
-    :return: размер чанка и остаток
-    """
-    slice_size = requests_count // worker_count
-    remainder = requests_count % worker_count
-    assert slice_size * worker_count + remainder == requests_count
-    return slice_size, remainder
+def get_log_data(log: str) -> tuple[list[tuple[Any]], int]:
+    results = []
+    requests_count = 0
+    for log in unpack_file(log):
+        data = pars_log(log)
+        requests_count += 1
+        results += data
 
-
-def data_preparation_for_processing(
-        executor: ProcessPoolExecutor,
-        log_file_list: list,
-        slice_size: int,
-        remainder: int,
-        worker_count: int
-) -> dict[Future[list[tuple[Any]]], str]:
-    """ Функция нарезает исходный лог файл на чанки для паралельного исполнения."""
-    slice_start = 0
-    slice_end = slice_size
-    future_to_pars = {}
-    for i in range(worker_count):
-        if i + 1 == worker_count:
-            # Если это последний чанк, добавляем остаток строк
-            slice_end += remainder + 1
-        log_slice = log_file_list[slice_start:slice_end]
-        chunk = '\n'.join(log_slice)
-        future_to_pars[executor.submit(pars_log, chunk)] = chunk
-
-        slice_start = slice_end
-        slice_end += slice_size
-
-    return future_to_pars
+    return results, requests_count
 
 
 def main():
-    conf = get_config(config)
+    conf = get_config(CONFIG, get_args_parser())
+    if not conf:
+        sys.exit(1)
 
-    logging_file_path = conf.get('LOGGING_FILE_PATH')
-    log_dir = conf.get('LOG_DIR')
-    report_size = conf.get('REPORT_SIZE')
+    dictConfig(get_logging_config(conf.get('LOGGING_FILE_PATH')))
+    try:
+        last_log, _ = get_log_files(conf.get('LOG_DIR'))[0]
+    except IndexError:
+        logger.error('Файлов с логами не найдено.')
+        sys.exit(1)
+
+    report_name = get_report_name(last_log)
     report_dir = conf.get('REPORT_DIR')
-    worker_count = int(conf.get('WORKER_COUNT', 1))
+    filename = get_filename_from_path(last_log)
 
-    dictConfig(get_logging_config(logging_file_path))
+    if os.path.exists(os.path.join(report_dir, report_name)):
+        logger.info(f'Отчет {report_name} существует.')
+        sys.exit(0)
 
-    logs = get_log_files(log_dir)
-    for log, filename, report_name in unpack_files(logs):
-        if os.path.exists(os.path.join(report_dir, report_name)):
-            logger.info(f'Отчет {report_name} существует. ')
-            continue
+    results, requests_count = get_log_data(last_log)
+    if get_perc(requests_count, len(results)) < 50:
+        logger.error(f'Неудалось распарсить больше половины файла {filename}')
+        sys.exit(1)
 
-        log_file_list = log.split('\n')
-        requests_count = len(log_file_list)
-        slice_size, remainder = get_slice_size_and_remainder(requests_count, worker_count)
-
-        with concurrent.futures.ProcessPoolExecutor(max_workers=worker_count) as executor:
-            future_to_pars = data_preparation_for_processing(
-                executor,
-                log_file_list,
-                slice_size,
-                remainder,
-                worker_count
-            )
-
-            results = []
-            for future in concurrent.futures.as_completed(future_to_pars):
-                try:
-                    pars_data = future.result()
-                except Exception:
-                    logger.error(f'Ошибка парсинга файла {filename}')
-                else:
-                    results += pars_data
-
-        if get_perc(requests_count, len(results)) < 50:
-            logger.error(f'Неудалось распарсить больше половины файла {filename}')
-            continue
-
-        data_for_render = get_log_data(results, requests_count, report_size)
-        if data_for_render:
-            create_report(report_name, data_for_render, report_dir)
+    if data_for_render := get_data_for_render(results, requests_count, conf.get('REPORT_SIZE')):
+        create_report(report_name, data_for_render, report_dir)
 
 
 if __name__ == "__main__":
@@ -272,8 +231,7 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        if not isinstance(e, BaseLogAnalyzerError):
-            logger.exception(e)
+        logger.exception(e)
         sys.exit(1)
 
     print("--- %s seconds ---" % (time.time() - start_time))
