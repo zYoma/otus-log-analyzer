@@ -1,0 +1,23 @@
+[tool.poetry]
+name = "log-analyzer"
+version = "0.1.0"
+description = ""
+authors = ["Зимин Николай <Nikola.Zimin@x5.ru>"]
+readme = "README.md"
+packages = [{include = "log_analyzer"}]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+
+
+[tool.poetry.group.dev.dependencies]
+isort = "^5.10.1"
+flake8 = "^5.0.4"
+flake8-isort = "^4.2.0"
+flake8-commas = "^2.1.0"
+mypy = "^0.971"
+pytest = "^7.1.2"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
