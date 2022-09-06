@@ -101,7 +101,7 @@ def get_file_date(file_path: str) -> Optional[date]:
 def get_report_name(filename: str) -> str:
     date = get_file_date(filename)
     if not date:
-        date = datetime.now()
+        return 'report-unknown.html'
     return f"report-{datetime.strftime(date, '%Y.%m.%d')}.html"
 
 
