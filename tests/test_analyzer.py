@@ -12,6 +12,7 @@ from log_analyzer import (
     get_perc,
     get_report_name,
     is_gzip_file,
+    pars_log,
     unpack_file
 )
 
@@ -50,12 +51,14 @@ def test_get_perc(total_count, count, result):
 
 def test_get_log_files(create_log_files):
     result = get_log_files('./log_tmp')
-    assert str(result) == "[('./log_tmp/nginx-access-ui.log-20190630.gz', datetime.date(2019, 6, 30)), " \
-                          "('./log_tmp/nginx-access-ui.log-20180630.gz', datetime.date(2018, 6, 30))]"
+    assert str(result) == "[File(filename='./log_tmp/nginx-access-ui.log-20190630.gz', " \
+                          "date=datetime.date(2019, 6, 30)), " \
+                          "File(filename='./log_tmp/nginx-access-ui.log-20180630.gz', " \
+                          "date=datetime.date(2018, 6, 30))]"
 
 
 def test_get_log_data(create_log_files, log_data_result):
-    result, count = get_log_data('./log_tmp/nginx-access-acc.log-20200430')
+    result, count = get_log_data('./log_tmp/nginx-access-acc.log-20200430', pars_log)
     assert count == 10
     assert result == log_data_result
 
@@ -70,17 +73,17 @@ def test_create_report(log_data_result, create_report_dir):
         assert len(result) == 4293
 
 
-@pytest.mark.parametrize('config_ini_parser, result', [  # noqa
-    ({'any': 1}, None),
-    ({'log-analyzer': {}}, {'LOG_DIR': './log', 'REPORT_DIR': './reports', 'REPORT_SIZE': 1000}),
+@pytest.mark.parametrize('config_args, result', [  # noqa
+    ({'any': 1}, {'REPORT_SIZE': 1000, 'REPORT_DIR': './reports', 'LOG_DIR': './log', 'any': 1}),
+    ({}, {'LOG_DIR': './log', 'REPORT_DIR': './reports', 'REPORT_SIZE': 1000}),
     (None, {'LOG_DIR': './log', 'REPORT_DIR': './reports', 'REPORT_SIZE': 1000}),
     (
-        {'log-analyzer': {'REPORT_DIR': './other', 'REPORT_SIZE': 1500}},
+        {'REPORT_DIR': './other', 'REPORT_SIZE': 1500},
         {'LOG_DIR': './log', 'REPORT_DIR': './other', 'REPORT_SIZE': 1500}
     ),
 ])
-def test_get_config(config_ini_parser, result):
-    test_result = get_config(CONFIG, config_ini_parser)
+def test_get_config(config_args, result):
+    test_result = get_config(CONFIG, config_args)
     assert test_result == result
 
 

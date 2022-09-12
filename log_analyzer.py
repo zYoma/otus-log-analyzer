@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-from typing import Any, Generator, Optional
+from typing import Any, Callable, Generator, NamedTuple, Optional
 
 import configparser
 import copy
@@ -12,7 +12,7 @@ import shutil
 import statistics
 import sys
 import time
-from collections import Counter
+from collections import Counter, namedtuple
 from datetime import date, datetime
 from logging import getLogger
 from logging.config import dictConfig
@@ -36,7 +36,7 @@ CONFIG = {
 }
 
 
-def get_args_parser() -> Optional[configparser.ConfigParser]:
+def get_args_parser() -> Optional[dict[str, Any]]:
     args_parser = optparse.OptionParser()
     config_ini_parser = configparser.ConfigParser()
 
@@ -45,44 +45,43 @@ def get_args_parser() -> Optional[configparser.ConfigParser]:
     options, _ = args_parser.parse_args()
     if options.config:
         config_ini_parser.read(options.config)
-        return config_ini_parser
+        try:
+            return {
+                param.upper(): value
+                for param, value in config_ini_parser['log-analyzer'].items()
+            }
+        except KeyError:
+            logger.error('Не удалось распарсить файл конфигурации.')
 
     return None
 
 
 def get_config(
         config_file: dict,
-        config_ini_parser: Optional[configparser.ConfigParser]
+        config_args: dict
 ) -> Optional[dict[str, Any]]:
     actual_config = copy.deepcopy(config_file)
-    if config_ini_parser:
-        try:
-            [
-                actual_config.update({param.upper(): value})
-                for param, value in config_ini_parser['log-analyzer'].items()
-            ]
-        except KeyError:
-            logger.error('Не удалось распарсить файл конфигурации.')
-            return None
-
+    if config_args:
+        actual_config.update(**config_args)
     return actual_config
 
 
 def get_filename_from_path(path: str) -> str:
     if not path:
         return ''
-    return path.split('/')[-1]
+    return os.path.split(path)[-1]
 
 
-def get_log_files(log_dir: str) -> list[tuple]:
+def get_log_files(log_dir: str) -> list[NamedTuple]:
     result = []
-    for (dir_path, _, filenames) in os.walk(log_dir):
-        for name in filenames:
-            # Берем только логи сервиса ui, только те у которых парсится дата в имени
-            if re.search(SERVICE_NAME_PATTERN, name) and get_file_date(name):
-                result.append((os.path.join(dir_path, name), get_file_date(name)))
+    File = namedtuple('File', 'filename date')
+    for filenames in os.listdir(log_dir):
+        file_date = get_file_date(filenames)
+        # Берем только логи сервиса ui, только те у которых парсится дата в имени
+        if re.search(SERVICE_NAME_PATTERN, filenames) and file_date:
+            result.append(File((os.path.join(log_dir, filenames)), file_date))
 
-    return sorted(result, key=lambda pair: pair[1], reverse=True)  # type: ignore
+    return sorted(result, key=lambda pair: pair.date, reverse=True)  # type: ignore
 
 
 def get_file_date(file_path: str) -> Optional[date]:
@@ -183,11 +182,11 @@ def pars_log(log_file: str) -> list[tuple[Any]]:
     return LOG_COMPILED.findall(log_file)
 
 
-def get_log_data(log: str) -> tuple[list[tuple[Any]], int]:
+def get_log_data(log: str, parser: Callable) -> tuple[list[tuple[Any]], int]:
     results = []
     requests_count = 0
     for log in unpack_file(log):
-        data = pars_log(log)
+        data = parser(log)
         requests_count += 1
         results += data
 
@@ -196,16 +195,14 @@ def get_log_data(log: str) -> tuple[list[tuple[Any]], int]:
 
 def main():
     conf = get_config(CONFIG, get_args_parser())
-    if not conf:
-        sys.exit(1)
-
     dictConfig(get_logging_config(conf.get('LOGGING_FILE_PATH')))
     try:
-        last_log, _ = get_log_files(conf.get('LOG_DIR'))[0]
+        last_log_file = get_log_files(conf.get('LOG_DIR'))[0]
     except IndexError:
         logger.error('Файлов с логами не найдено.')
         sys.exit(1)
 
+    last_log = last_log_file.filename
     report_name = get_report_name(last_log)
     report_dir = conf.get('REPORT_DIR')
     filename = get_filename_from_path(last_log)
@@ -214,7 +211,7 @@ def main():
         logger.info(f'Отчет {report_name} существует.')
         sys.exit(0)
 
-    results, requests_count = get_log_data(last_log)
+    results, requests_count = get_log_data(last_log, pars_log)
     if get_perc(requests_count, len(results)) < 50:
         logger.error(f'Неудалось распарсить больше половины файла {filename}')
         sys.exit(1)
