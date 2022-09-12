@@ -75,16 +75,14 @@ def get_filename_from_path(path: str) -> str:
 
 
 def get_log_files(log_dir: str) -> list[tuple]:
-    return sorted(
-        [
-            # ('./log/nginx-access-ui.log-20190722', datetime.date(2019, 7, 22))
-            (os.path.join(dir_path, name), get_file_date(name))
-            for (dir_path, _, filenames) in os.walk(log_dir)
-            for name in filenames
-            if re.search(SERVICE_NAME_PATTERN, name)  # Берем только логи сервиса ui
-            and get_file_date(name)  # только те у которых парсится дата в имени
-        ], key=lambda pair: pair[1], reverse=True  # type: ignore # Сортируем по дате
-    )
+    result = []
+    for (dir_path, _, filenames) in os.walk(log_dir):
+        for name in filenames:
+            # Берем только логи сервиса ui, только те у которых парсится дата в имени
+            if re.search(SERVICE_NAME_PATTERN, name) and get_file_date(name):
+                result.append((os.path.join(dir_path, name), get_file_date(name)))
+
+    return sorted(result, key=lambda pair: pair[1], reverse=True)  # type: ignore
 
 
 def get_file_date(file_path: str) -> Optional[date]:
