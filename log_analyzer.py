@@ -22,6 +22,7 @@ from conf.logging import get_logging_config
 
 
 logger = getLogger("log-analyzer")
+File = namedtuple('File', 'filename date')
 
 LOG_COMPILED = re.compile(
     r'.* .*  .* \[.*\] \".* (?P<url>.*) .*\" .* .* \".*\" \".*\" \".*\" \".*\" \".*\" (?P<request_time>.*)'
@@ -36,15 +37,18 @@ CONFIG = {
 }
 
 
-def get_args_parser() -> Optional[dict[str, Any]]:
+def get_args() -> optparse.Values:
     args_parser = optparse.OptionParser()
-    config_ini_parser = configparser.ConfigParser()
-
     args_parser.add_option('-c', '--config', dest="config",
                            help="Абсолютный путь к файлу конфигурации", default="")
-    options, _ = args_parser.parse_args()
-    if options.config:
-        config_ini_parser.read(options.config)
+    args, _ = args_parser.parse_args()
+    return args
+
+
+def parse_config(args: optparse.Values) -> Optional[dict[str, Any]]:
+    config_ini_parser = configparser.ConfigParser()
+    if args.config:
+        config_ini_parser.read(args.config)
         try:
             return {
                 param.upper(): value
@@ -74,7 +78,6 @@ def get_filename_from_path(path: str) -> str:
 
 def get_log_files(log_dir: str) -> list[NamedTuple]:
     result = []
-    File = namedtuple('File', 'filename date')
     for filenames in os.listdir(log_dir):
         file_date = get_file_date(filenames)
         # Берем только логи сервиса ui, только те у которых парсится дата в имени
@@ -194,7 +197,8 @@ def get_log_data(log: str, parser: Callable) -> tuple[list[tuple[Any]], int]:
 
 
 def main():
-    conf = get_config(CONFIG, get_args_parser())
+    args = get_args()
+    conf = get_config(CONFIG, parse_config(args))
     dictConfig(get_logging_config(conf.get('LOGGING_FILE_PATH')))
     try:
         last_log_file = get_log_files(conf.get('LOG_DIR'))[0]
